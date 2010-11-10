@@ -8,6 +8,9 @@ class PPGraph(Thread):
 		self.lock = threading.Lock()
 		self.serverThread = 0
 		self.newConnections = []
+		self.dataToPublish = []
+		
+		self.groups = {}
 	
 	def run(self):
 		
@@ -18,11 +21,11 @@ class PPGraph(Thread):
 		
 		# begin loop
 		
-		# check for new messages to send
-		
-		# check for incoming messages from peers
+		# check for new data to publish
 		
 		# check for new connections to initialize
+		
+		# check for incoming messages from peers
 		
 		# check for maintenance timeouts
 		
@@ -46,8 +49,15 @@ class PPGraph(Thread):
 	
 	# publish data of type recordTypeId to all members of the graph, returns
 	# the record's GUID
-	def publish(self, graphId, data, recordTypeId):
-		pass
+	def publish(self, graphId, recordTypeId, data):
+		guid = self.genGUID()
+		self.lock.acquire()
+		try:
+			self.dataToPublish.append(graphId, guid, recordTypeId, data)
+			return guid
+		finally:
+			self.lock.release()
+		return Nil
 	
 	# retrieve the given record from the given graph
 	def get(self, graphId, recordId):
@@ -93,4 +103,4 @@ class Server(Thread):
 			(clientsocket, address) = serversocket.accept()
 			#now do something with the clientsocket
 			#in this case, we'll pretend this is a threaded server
-			myppGraph.addConnection(clientsocket, address)
+			myppGraph.addConnection(clientsocket)
