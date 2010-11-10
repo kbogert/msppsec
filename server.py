@@ -2,6 +2,42 @@ import threading
 import uuid
 
 
+class Group:
+
+	def __init__(self):
+		self.scope = 0
+		self.creatorID = ""
+		self.friendlyName = ""
+		self.comment = ""
+		self.presenceLifetime = 0
+		self.maxPresenceRecords = 0
+		self.maxRecordSize = 0;
+		self.signatureRecord = ""
+		self.nodes = {}
+		self.records = {}
+		self.recordTypes = {}
+		self.attributes = ""
+		self.contacts = {}
+	
+class Record:
+	def __init__(self):
+		self.guid = ""
+		self.typeID = ""
+		self.creator = ""
+		self.timestamp = 0
+		self.createdAt = 0
+		self.data = ""
+		self.attributes = ""
+	
+class Node:
+	def __init__(self):
+		self.guid = ""
+		self.addresses = []
+		self.attributes = ""
+		self.records = {}
+		self.recordTypes = {}
+
+
 class PPGraph(Thread):
 	
 	
@@ -86,11 +122,9 @@ class PPGraph(Thread):
 		return UUID().bytes
 
 class Server(Thread):
-	myppGraph
-	port
 	
 	def __init__(self, ppgraph, port):
-		myppGraph = ppgraph
+		self.myppGraph = ppgraph
 		self.port = port
 	
 	def run(self):
@@ -99,7 +133,7 @@ class Server(Thread):
 			socket.AF_INET, socket.SOCK_STREAM)
 		#bind the socket to a public host,
 		# and a well-known port
-		serversocket.bind((socket.gethostname(), port))
+		serversocket.bind((socket.gethostname(), self.port))
 		#become a server socket
 		serversocket.listen(5)
 
@@ -108,4 +142,4 @@ class Server(Thread):
 			(clientsocket, address) = serversocket.accept()
 			#now do something with the clientsocket
 			#in this case, we'll pretend this is a threaded server
-			myppGraph.addConnection(clientsocket)
+			self.myppGraph.addConnection(clientsocket)
