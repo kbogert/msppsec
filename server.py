@@ -1,4 +1,6 @@
 import threading
+import uuid
+
 
 class PPGraph(Thread):
 	
@@ -57,7 +59,7 @@ class PPGraph(Thread):
 			return guid
 		finally:
 			self.lock.release()
-		return Nil
+		return nil
 	
 	# retrieve the given record from the given graph
 	def get(self, graphId, recordId):
@@ -79,6 +81,9 @@ class PPGraph(Thread):
 	def listMembers(self, graphId):
 		pass
 		
+	# return a 
+	def genGUID(self):
+		return UUID().bytes
 
 class Server(Thread):
 	myppGraph
