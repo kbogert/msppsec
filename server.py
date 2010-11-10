@@ -99,23 +99,70 @@ class PPGraph(Thread):
 	
 	# retrieve the given record from the given graph
 	def get(self, graphId, recordId):
-		pass
+		self.lock.acquire()
+		try:
+			if not self.groups.has_key(graphId):
+				return nil
+			
+			if not self.groups.get(graphId).records.has_key(recordId):
+				return nil
+			
+			return self.groups.get(graphId).records.get(recordId)
+		finally:
+			self.lock.release()
 
 	# retrieve all records of type recordTypeId from the given graph
 	def getAll(self, graphId, recordTypeId):
-		pass
+		self.lock.acquire()
+		try:
+			if not self.groups.has_key(graphId):
+				return nil
+			
+			if not self.groups.get(graphId).recordTypes.has_key(recordId):
+				return []
+			
+			return self.groups.get(graphId).recordTypes.get(recordTypeId)
+		finally:
+			self.lock.release()
 	
 	# returns all record types for the given peer in the given graph
 	def getRecordTypesFor(self, graphId, peerId):
-		pass
+		self.lock.acquire()
+		try:
+			if not self.groups.has_key(graphId):
+				return nil
+			
+			if not self.groups.get(graphId).nodes.has_key(peerId):
+				return nil
+			
+			return self.groups.get(graphId).nodes.get(peerId).recordTypes.keys()
+		finally:
+			self.lock.release()
 	
 	# get all records from a peer for a given graph
 	def getAllFor(self, graphId, peerId):
-		pass
+		self.lock.acquire()
+		try:
+			if not self.groups.has_key(graphId):
+				return nil
+			
+			if not self.groups.get(graphId).nodes.has_key(peerId):
+				return nil
+			
+			return self.groups.get(graphId).nodes.get(peerId).records
+		finally:
+			self.lock.release()
 	
 	# list members of the graph that we know about with their peerIds
 	def listMembers(self, graphId):
-		pass
+		self.lock.acquire()
+		try:
+			if not self.groups.has_key(graphId):
+				return nil
+			
+			return self.groups.get(graphId).nodes.keys()
+		finally:
+			self.lock.release()
 		
 	# return a 
 	def genGUID(self):
