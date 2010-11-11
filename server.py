@@ -1,6 +1,6 @@
 import threading
 import uuid
-
+import time
 
 class Group:
 
@@ -38,6 +38,43 @@ class Node:
 		self.recordTypes = {}
 
 
+class PPGraphContact(Thread):
+	
+	
+	def __init__(self, ppgraph, socket, newConnection = False):
+		self.ppgraph = ppgraph
+		self.socket = socket
+		self.lock = threading.Lock()
+		self.rcvBuffer = ""
+		self.rcvPacketSize = 0
+		self.sendBuffer = ""
+		self.isNewConnection = newConnection
+		self.recordsToPublish = []
+		self.peerId = ""
+		
+	def run(self):
+		
+		# if it's a new connection then perform handshaking and
+		# update the PPGraph's data structures correctly with the new
+		# contact
+		
+		if self.isNewConnection:
+			pass
+		
+		
+		while(True):
+			pass
+				# check for new data to publish
+				
+				# check for incoming messages from peers
+				
+
+	def publish(self, recordStruct):
+		pass
+
+# This is not the correct way to handle blocking sockets! this architecture should
+# either be non-blocking, or we kickoff a manager thread when a new socket is
+# established with a peer for sending/receiving data
 class PPGraph(Thread):
 	
 	
@@ -45,8 +82,7 @@ class PPGraph(Thread):
 		self.listenPort = listenPort
 		self.lock = threading.Lock()
 		self.serverThread = 0
-		self.newConnections = []
-		self.dataToPublish = []
+		self.peerId = ""
 		
 		self.groups = {}
 	
@@ -58,27 +94,27 @@ class PPGraph(Thread):
 		
 		
 		# begin loop
-		
-		# check for new data to publish
-		
-		# check for new connections to initialize
-		
-		# check for incoming messages from peers
-		
-		# check for maintenance timeouts
+		while True:
+			time.sleep(600)			
+			self.lock.acquire()
+			try:
+				pass
+				# perform maintenenance 
+				
+			finally:
+				self.lock.release()
+				
+
 		
 	# adds a new socket, we don't know which graph it's for yet
 	def addConnection(self, socket):
-		self.lock.acquire()
-		try:
-			self.newConnections.append(socket);
-			
-		finally:
-			self.lock.release()
+		
+		newconn = PPGraphContact(self, socket, True)
+		newconn.start()
 		
 	
-	# join an existing graph, returns the GUID on success
-	def joinGraph(self, address, port, secProvider):
+	# join an existing graph, returns the GUID of the local node on success
+	def joinGraph(self, graphGUID, address, port, secProvider):
 		pass
 	
 	# create a new graph, returns the graph GUID
@@ -89,9 +125,32 @@ class PPGraph(Thread):
 	# the record's GUID
 	def publish(self, graphId, recordTypeId, data):
 		guid = self.genGUID()
+		
+		newRecord = Record()
+		newRecord.attributes = ""
+		newRecord.createdAt = time.gmtime()
+		newRecord.creator = self.peerId
+		newRecord.data = data
+		newRecord.guid = guid
+		newRecord.timestamp = time.gmtime()
+		newRecord.typeID = recordTypeId
+		
 		self.lock.acquire()
 		try:
-			self.dataToPublish.append(graphId, guid, recordTypeId, data)
+			if not self.groups.has_key(graphId):
+				return nil
+			
+			groupstruct = self.groups.get(graphId)
+			groupstruct.records[guid] = newRecord
+			groupstruct.recordTypes[recordTypeId].append(newRecord)
+			
+			if self.peerId in groupstruct.contacts:
+				groupstruct.contacts[self.peerId].records[guid] = newRecord				
+				groupstruct.contacts[self.peerId].recordTypes[recordTypeId].append(newRecord)
+			
+			for (peerId, contactStruct) in groupstruct.contacts:
+				contactStruct.publish(newRecord)
+				
 			return guid
 		finally:
 			self.lock.release()
