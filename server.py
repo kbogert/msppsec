@@ -2,7 +2,7 @@ import threading
 import uuid
 import time
 
-class Group:
+class Graph:
 
 	def __init__(self):
 		self.scope = 0
@@ -18,6 +18,7 @@ class Group:
 		self.recordTypes = {}
 		self.attributes = ""
 		self.contacts = {}
+		self.secProvider = 0
 	
 class Record:
 	def __init__(self):
@@ -66,11 +67,79 @@ class PPGraphContact(Thread):
 			pass
 				# check for new data to publish
 				
+				# TODO check for data to update
+				
 				# check for incoming messages from peers
+				
+				# if nothing for a while ping
+				
+				# if no response to ping, destroy connection
 				
 
 	def publish(self, recordStruct):
-		pass
+		self.lock.acquire()
+		try:
+			self.recordsToPublish.append(recordStruct)
+		finally:
+			self.lock.release()
+			
+			
+	def sendAuthInfo():
+	
+	def sendConnect():
+		
+	def sendWelcome():
+	
+	def sendRefuse():
+	
+	def sendDisconnect():
+		
+	def sendSolictNew():
+		
+	def sendSolictTime():
+		
+	def sendSolictHash():
+		
+	def sendAdvertise():
+		
+	def sendRequest():
+	
+	def sendFlood():
+		
+	def sendSyncEnd():
+		
+	def sendPT2PT():
+		
+	def sendACK():
+		
+		
+	def rcvAuthInfo():
+	
+	def rcvConnect():
+		
+	def rcvWelcome():
+	
+	def rcvRefuse():
+	
+	def rcvDisconnect():
+		
+	def rcvSolictNew():
+		
+	def rcvSolictTime():
+		
+	def rcvSolictHash():
+		
+	def rcvAdvertise():
+		
+	def rcvRequest():
+	
+	def rcvFlood():
+		
+	def rcvSyncEnd():
+		
+	def rcvPT2PT():
+		
+	def rcvACK():
 
 # This is not the correct way to handle blocking sockets! this architecture should
 # either be non-blocking, or we kickoff a manager thread when a new socket is
@@ -84,7 +153,7 @@ class PPGraph(Thread):
 		self.serverThread = 0
 		self.peerId = ""
 		
-		self.groups = {}
+		self.graphs = {}
 	
 	def run(self):
 		
@@ -99,7 +168,12 @@ class PPGraph(Thread):
 			self.lock.acquire()
 			try:
 				pass
-				# perform maintenenance 
+				# perform maintenenance (publish presence and contact records)
+				# remove all data for nodes with expired presence records
+				# remove all expired records
+				# check if our number of nodes should be increased/decreased
+				#	If so, connect to new nodes/disconnect
+				# check for partition of network
 				
 			finally:
 				self.lock.release()
@@ -115,11 +189,34 @@ class PPGraph(Thread):
 	
 	# join an existing graph, returns the GUID of the local node on success
 	def joinGraph(self, graphGUID, address, port, secProvider):
+		# can't fire off a thread until after successful connection and
+		# authentication
+		
 		pass
 	
-	# create a new graph, returns the graph GUID
-	def createGraph(self, secProvider):
-		pass
+	# create a new graph, returns the graph GUID, and local node Id
+	def createGraph(self, secProvider, name):
+		graphGUID = self.genGUID()
+		nodeID = self.genGUID()
+		
+		graph = Graph()
+		graph.secProvider = secProvider
+		graph.friendlyName = name
+		graph.creatorID = nodeID
+		graph.scope = 0x00000003 
+		graph.presenceLifetime = 600
+		graph.signatureRecord = nodeID
+		graph.maxRecordSize = 4096
+		
+		self.lock.acquire()
+		try:
+			self.graphs[graphGUID] = graph
+		finally:
+			self.lock.release()
+			
+			
+		return (graphGUID, nodeID)
+		
 	
 	# publish data of type recordTypeId to all members of the graph, returns
 	# the record's GUID
@@ -132,23 +229,23 @@ class PPGraph(Thread):
 		newRecord.creator = self.peerId
 		newRecord.data = data
 		newRecord.guid = guid
-		newRecord.timestamp = time.gmtime()
+		newRecord.timestamp = 0
 		newRecord.typeID = recordTypeId
 		
 		self.lock.acquire()
 		try:
-			if not self.groups.has_key(graphId):
+			if not self.graphs.has_key(graphId):
 				return nil
 			
-			groupstruct = self.groups.get(graphId)
-			groupstruct.records[guid] = newRecord
-			groupstruct.recordTypes[recordTypeId].append(newRecord)
+			graphstruct = self.graphs.get(graphId)
+			graphstruct.records[guid] = newRecord
+			graphstruct.recordTypes[recordTypeId].append(newRecord)
 			
-			if self.peerId in groupstruct.contacts:
-				groupstruct.contacts[self.peerId].records[guid] = newRecord				
-				groupstruct.contacts[self.peerId].recordTypes[recordTypeId].append(newRecord)
+			if self.peerId in graphstruct.contacts:
+				graphstruct.contacts[self.peerId].records[guid] = newRecord				
+				graphstruct.contacts[self.peerId].recordTypes[recordTypeId].append(newRecord)
 			
-			for (peerId, contactStruct) in groupstruct.contacts:
+			for (peerId, contactStruct) in graphstruct.contacts:
 				contactStruct.publish(newRecord)
 				
 			return guid
@@ -160,13 +257,13 @@ class PPGraph(Thread):
 	def get(self, graphId, recordId):
 		self.lock.acquire()
 		try:
-			if not self.groups.has_key(graphId):
+			if not self.graphs.has_key(graphId):
 				return nil
 			
-			if not self.groups.get(graphId).records.has_key(recordId):
+			if not self.graphs.get(graphId).records.has_key(recordId):
 				return nil
 			
-			return self.groups.get(graphId).records.get(recordId)
+			return self.graphs.get(graphId).records.get(recordId)
 		finally:
 			self.lock.release()
 
@@ -174,13 +271,13 @@ class PPGraph(Thread):
 	def getAll(self, graphId, recordTypeId):
 		self.lock.acquire()
 		try:
-			if not self.groups.has_key(graphId):
+			if not self.graphs.has_key(graphId):
 				return nil
 			
-			if not self.groups.get(graphId).recordTypes.has_key(recordId):
+			if not self.graphs.get(graphId).recordTypes.has_key(recordId):
 				return []
 			
-			return self.groups.get(graphId).recordTypes.get(recordTypeId)
+			return self.graphs.get(graphId).recordTypes.get(recordTypeId)
 		finally:
 			self.lock.release()
 	
@@ -188,13 +285,13 @@ class PPGraph(Thread):
 	def getRecordTypesFor(self, graphId, peerId):
 		self.lock.acquire()
 		try:
-			if not self.groups.has_key(graphId):
+			if not self.graphs.has_key(graphId):
 				return nil
 			
-			if not self.groups.get(graphId).nodes.has_key(peerId):
+			if not self.graphs.get(graphId).nodes.has_key(peerId):
 				return nil
 			
-			return self.groups.get(graphId).nodes.get(peerId).recordTypes.keys()
+			return self.graphs.get(graphId).nodes.get(peerId).recordTypes.keys()
 		finally:
 			self.lock.release()
 	
@@ -202,13 +299,13 @@ class PPGraph(Thread):
 	def getAllFor(self, graphId, peerId):
 		self.lock.acquire()
 		try:
-			if not self.groups.has_key(graphId):
+			if not self.graphs.has_key(graphId):
 				return nil
 			
-			if not self.groups.get(graphId).nodes.has_key(peerId):
+			if not self.graphs.get(graphId).nodes.has_key(peerId):
 				return nil
 			
-			return self.groups.get(graphId).nodes.get(peerId).records
+			return self.graphs.get(graphId).nodes.get(peerId).records
 		finally:
 			self.lock.release()
 	
@@ -216,10 +313,10 @@ class PPGraph(Thread):
 	def listMembers(self, graphId):
 		self.lock.acquire()
 		try:
-			if not self.groups.has_key(graphId):
+			if not self.graphs.has_key(graphId):
 				return nil
 			
-			return self.groups.get(graphId).nodes.keys()
+			return self.graphs.get(graphId).nodes.keys()
 		finally:
 			self.lock.release()
 		
