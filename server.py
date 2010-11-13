@@ -3,6 +3,8 @@ import uuid
 import time
 import struct
 import random
+import socket
+import sys
 
 MAX_FRAMESIZE = 16384
 MAX_MESSAGESIZE = 63914560
@@ -18,27 +20,32 @@ class Graph:
 		self.maxPresenceRecords = 0
 		self.maxRecordSize = 0
 		self.signatureRecord = ""
-		self.nodes = {}
-		self.records = {}
-		self.recordTypes = {}
+		self.nodes = {} # nodeId : Node instace
+		self.records = {} # recordGUID : record
+		self.recordTypes = {} # recordTypeID : array of records
 		self.attributes = ""
-		self.contacts = {}
+		self.contacts = {} # nodeId : PPGraphContact instance
 		self.secProvider = 0
-		self.myGUID = 0
+		self.myPeerID = "" # supplied by application
+		self.myNodeID = 0 # 64 bit random number
 	
 class Record:
 	def __init__(self):
 		self.guid = ""
 		self.typeID = ""
 		self.creator = ""
-		self.timestamp = 0
+		self.version = 1
+		self.modificationTime = 0
 		self.createdAt = 0
+		self.expireTime
 		self.data = ""
+		self.securityData = ""
 		self.attributes = ""
 	
 class Node:
 	def __init__(self):
-		self.guid = ""
+		self.peerId = ""
+		self.nodeId = 0
 		self.addresses = []
 		self.attributes = ""
 		self.records = {}
@@ -60,7 +67,8 @@ class PPGraphContact(threading.Thread):
 	def __init__(self, ppgraph, socket, incoming = False):
 		self.ppgraph = ppgraph
 		self.socket = socket
-		self.lock = threading.Lock()
+		self.lock = threading.Condition()
+		self.graphGUID = ""
 		
 		self.frameBuffer = ""
 		self.frameSize = -1	
@@ -71,9 +79,10 @@ class PPGraphContact(threading.Thread):
 		self.sendFrameBuffer = "" # how much is remaining to send of a frame
 		self.incoming = incoming
 		self.recordsToPublish = [] # need lock before accessing
-		self.peerId = -1
+		self.nodeID = -1 # nodeid of this contact
+		self.peerID = "" # peerid of this contact
 		
-		self.socket.setTimeout(2)
+		self.socket.settimeout(2)
 		
 		self.recvMap = {1 : self.rcvAuthInfo,
 				2 : self.rcvConnect,
@@ -89,6 +98,7 @@ class PPGraphContact(threading.Thread):
 				12 :self.rcvSyncEnd,
 				13 :self.rcvPT2PT,
 				14 :self.rcvACK}
+		threading.Thread.__init__(self)
 		
 	def run(self):
 		
@@ -98,7 +108,15 @@ class PPGraphContact(threading.Thread):
 		
 		if not self.incoming:
 			self.sendAuthInfo()
+			try:
+				self.send()
+			except (socket.timeout):
+				pass
 			self.sendConnect()
+			try:
+				self.send()
+			except (socket.timeout):
+				pass
 		
 		try:
 			while(True):
@@ -113,7 +131,7 @@ class PPGraphContact(threading.Thread):
 					pass
 				
 				# check for new data to publish
-				performFlood = false
+				performFlood = False
 				self.lock.acquire()
 				try:
 					if len(self.recordsToPublish) > 0:
@@ -130,9 +148,28 @@ class PPGraphContact(threading.Thread):
 					
 				# if no response to ping, destroy connection
 				
-		except (Exception):
-			# unknown exception, close the socket, remove myself from the graph
-			pass
+		except:
+			if self.incoming:
+				print("ReceivingSide Error: ", sys.exc_info()[1])
+			else:				
+				print("SendingSide Error: ", sys.exc_info()[1])
+		
+		# close the socket, remove myself from the graph
+		self.socket.shutdown(socket.SHUT_RDWR)
+		self.socket.close()
+			
+		if self.nodeID != -1 and self.graphGUID != "":
+			self.ppgraph.lock.acquire()
+			try:
+				del self.ppgraph.graphs[self.graphGUID].contacts[self.nodeID]
+			finally:
+				self.ppgraph.lock.release()
+			
+		self.lock.acquire()
+		try:
+			self.lock.notifyAll()
+		finally:
+			self.lock.release()
 
 	def publish(self, recordStruct):
 		self.lock.acquire()
@@ -146,7 +183,7 @@ class PPGraphContact(threading.Thread):
 		# NOTE in the event of a timeout, the main loop handles the exception
 		global MAX_FRAMESIZE
 		global MAX_MESSAGESIZE
-		
+			
 		if self.frameSize == -1:
 			x = self.socket.recv(4 - len(self.frameBuffer))
 			
@@ -172,7 +209,7 @@ class PPGraphContact(threading.Thread):
 				self.frameBuffer = ""
 				
 				if self.messageSize == -1:
-					self.messageSize, = struct.unpack("!i", self.message[0 : 4])
+					self.messageSize, = struct.unpack("!i", self.messageBuffer[0 : 4])
 					
 					if self.messageSize < 0 or self.messageSize > MAX_MESSAGESIZE:
 						raise ConnectionClosedException()
@@ -182,17 +219,18 @@ class PPGraphContact(threading.Thread):
 					self.messageSize = -1
 					self.messageBuffer = ""
 
+
 	def parseMessage(self):
 		
 		# first determine if the version matches, then get the message type
-		messageVersion, messagetype = struct.unpack("!BB", self.messageBuffer[4:8])
+		messageVersion, messagetype = struct.unpack("!BB", self.messageBuffer[4:6])
 		
 		if messageVersion != 16:
 			raise InvalidVersionException()
 		
 		# now call the appropriate receive function to handle the message
 		
-		func = self.recvMap(messagetype)
+		func = self.recvMap.get(messagetype)
 		func()
 	
 	
@@ -222,53 +260,88 @@ class PPGraphContact(threading.Thread):
 			finally:
 				self.lock.release()
 	
-	def sendAuthInfo():
+	def sendAuthInfo(self):
+		# called when trying to connect to a new node, basically to introduce myself
+		
+		formatStr = "!iBBxxBxHHH"
+		
+		graphIDstr = self.graphGUID + chr(0)
+		sourceIDstr = self.ppgraph.graphs[self.graphGUID].myPeerID + chr(0)
+		
+		formatStr += str(len(graphIDstr)) + "s" + str(len(sourceIDstr)) + "s"
+		
+		messageLen = 16 + len(graphIDstr) + len(sourceIDstr)
+		
+		message = struct.pack(formatStr, messageLen, 0x10, 1, 0x02, 16, 16 + len(graphIDstr), messageLen, graphIDstr, sourceIDstr )
+		
+		self.lock.acquire()
+		try:
+			self.sendBuffer.append(message)
+		finally:
+			self.lock.release()
+		
+	
+	def sendConnect(self):
+		pass
+		
+	def sendWelcome(self):
 		pass
 	
-	def sendConnect():
-		pass
-		
-	def sendWelcome():
+	def sendRefuse(self):
 		pass
 	
-	def sendRefuse():
+	def sendDisconnect(self):
+		pass
+		
+	def sendSolicitNew(self):
+		pass
+		
+	def sendSolicitTime(self):
+		pass
+		
+	def sendSolicitHash(self):
+		pass
+		
+	def sendAdvertise(self):
+		pass
+		
+	def sendRequest(self):
 		pass
 	
-	def sendDisconnect():
+	def sendFlood(self):
 		pass
 		
-	def sendSolictNew():
+	def sendSyncEnd(self):
 		pass
 		
-	def sendSolictTime():
+	def sendPT2PT(self):
 		pass
 		
-	def sendSolictHash():
+	def sendACK(self):
 		pass
 		
-	def sendAdvertise():
-		pass
 		
-	def sendRequest():
-		pass
+	# the other node is identifying itself, accept it
+	def rcvAuthInfo(self):
+		formatStr = "!iBBxxBxHHH"
+		(messageLen, version, messageType, connType, graphIDOffset, sourceIDOffset, destIDOffset) = struct.unpack(formatStr, self.messageBuffer[0:16])
+		if version != 0x10 or messageType != 0x01:
+			self.sendDisconnect()
+			return
+		
+		graphID = self.messageBuffer[graphIDOffset:sourceIDOffset - 1]
+		sourceID = self.messageBuffer[sourceIDOffset:destIDOffset - 1]
+		
+		self.graphGUID = graphID
+		if not self.ppgraph.graphs.has_key(graphID):
+			self.sendDisconnect()
+			return
+		
+		self.peerID = sourceID
+		print("The other peer is :" + self.peerID)
+		print("In the graph :" + self.graphGUID)
 	
-	def sendFlood():
-		pass
-		
-	def sendSyncEnd():
-		pass
-		
-	def sendPT2PT():
-		pass
-		
-	def sendACK():
-		pass
-		
-		
-	def rcvAuthInfo():
-		pass
-	
-	def rcvConnect():
+	def rcvConnect(self):
 		pass
 	
 	# also needs to notify the waiting ppsec thread
@@ -278,7 +351,7 @@ class PPGraphContact(threading.Thread):
 		self.lock.acquire()
 		try:
 			
-			self.lock.notify()
+			self.lock.notifyAll()
 		finally:
 			self.lock.release()
 			
@@ -287,58 +360,57 @@ class PPGraphContact(threading.Thread):
 		self.lock.acquire()
 		try:
 			
-			self.lock.notify()
+			self.lock.notifyAll()
 		finally:
 			self.lock.release()
 	
-	def rcvDisconnect():
+	def rcvDisconnect(self):
+		pass
+	    
+	def rcvSolicitNew(self):
 		pass
 		
-	def rcvSolictNew():
+	def rcvSolicitTime(self):
 		pass
 		
-	def rcvSolictTime():
+	def rcvSolicitHash(self):
 		pass
 		
-	def rcvSolictHash():
+	def rcvAdvertise(self):
 		pass
 		
-	def rcvAdvertise():
-		pass
-		
-	def rcvRequest():
+	def rcvRequest(self):
 		pass
 	
-	def rcvFlood():
+	def rcvFlood(self):
 		pass
 		
-	def rcvSyncEnd():
+	def rcvSyncEnd(self):
 		pass
 		
-	def rcvPT2PT():
+	def rcvPT2PT(self):
 		pass
 		
-	def rcvACK():
+	def rcvACK(self):
 		pass
 
-# This is not the correct way to handle blocking sockets! this architecture should
-# either be non-blocking, or we kickoff a manager thread when a new socket is
-# established with a peer for sending/receiving data
 class PPGraph(threading.Thread):
 	
 	
-	def __init__(self, secProvider, listenPort):
+	def __init__(self, listenPort):
 		self.listenPort = listenPort
 		self.lock = threading.Lock()
 		self.serverThread = 0
 		self.peerId = ""
 		
 		self.graphs = {}
+		
+		threading.Thread.__init__(self)
 	
 	def run(self):
 		
 		
-		self.serverThread = Server(self)
+		self.serverThread = Server(self, self.listenPort)
 		self.serverThread.start()
 		
 		
@@ -367,19 +439,20 @@ class PPGraph(threading.Thread):
 		newconn.start()
 		
 	
-	# join an existing graph, returns the ID of the local node on success
-	def joinGraph(self, graphGUID, peerGUID, address, port, secProvider):
+	# throws exception on failure
+	def joinGraph(self, graphGUID, localPeerID, address, port, secProvider):
 		# return until after successful connection and
 		# authentication
-		
+		localNodeID = random.uniform(0, 9223372036854775807) #nodeid is a random 64bit int
+
 		graph = Graph()
 		graph.secProvider = secProvider
 		graph.scope = 0x00000003 
-		nodeID = random.uniform(0, 9223372036854775807) #nodeid is a random 64bit int
-		graph.myGUID = nodeID
+		graph.myNodeID = localNodeID
+		graph.myPeerID = localPeerID
 		
-		socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		socket.connect((address, port))
+		s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		s.connect((address, port))
 		
 		self.lock.acquire()
 		try:
@@ -387,7 +460,8 @@ class PPGraph(threading.Thread):
 		finally:
 			self.lock.release()
 			
-		newconn = PPGraphContact(self, socket)
+		newconn = PPGraphContact(self, s)
+		newconn.graphGUID = graphGUID
 		newconn.lock.acquire()
 		try:
 			newconn.start()
@@ -398,28 +472,34 @@ class PPGraph(threading.Thread):
 		
 		self.lock.acquire()
 		try:
-			if self.graphs[graphGUID].contacts.has_key(peerGUID):
-				return nodeID
-			else:
+			if len(self.graphs[graphGUID].contacts.keys()) == 0:
+				del self.graphs[graphGUID]
 				raise Exception()
 		finally:
-			self.lock.release()		
+			self.lock.release()
+			
+		# TODO start a synchronization of the database
 		
 	
-	# create a new graph, returns the graph GUID, and local node Id
-	def createGraph(self, secProvider, name):
-		graphGUID = self.genGUID()
-		nodeID = random.uniform(0, 9223372036854775807) #nodeid is a random 64bit int
+	def createGraph(self, graphGUID, localPeerID, secProvider, friendlyName):
+		localNodeID = random.uniform(0, 9223372036854775807) #nodeid is a random 64bit int
 		
 		graph = Graph()
 		graph.secProvider = secProvider
-		graph.friendlyName = name
-		graph.creatorID = nodeID
+		graph.friendlyName = friendlyName
+		graph.creatorID = localPeerID
 		graph.scope = 0x00000003 
 		graph.presenceLifetime = 600
-		graph.signatureRecord = nodeID
-		graph.maxRecordSize = 4096
-		graph.myGUID = nodeID
+		graph.maxRecordSize = 0
+		graph.myNodeID = localNodeID
+		graph.myPeerID = localPeerID
+		
+		# TODO create default records for the graph:
+		
+		# graph info
+		# my contact record
+		# my presence record
+		# graph signature record
 		
 		self.lock.acquire()
 		try:
@@ -427,8 +507,6 @@ class PPGraph(threading.Thread):
 		finally:
 			self.lock.release()
 			
-			
-		return (graphGUID, nodeID)
 		
 	
 	# publish data of type recordTypeId to all members of the graph, returns
@@ -542,7 +620,8 @@ class Server(threading.Thread):
 	def __init__(self, ppgraph, port):
 		self.myppGraph = ppgraph
 		self.port = port
-	
+		threading.Thread.__init__(self)
+
 	def run(self):
 		#create an INET, STREAMing socket
 		serversocket = socket.socket(
@@ -552,7 +631,7 @@ class Server(threading.Thread):
 		serversocket.bind((socket.gethostname(), self.port))
 		#become a server socket
 		serversocket.listen(5)
-
+		print("Waiting for connection on " + str(self.port))
 		while True:
 			#accept connections from outside
 			(clientsocket, address) = serversocket.accept()
