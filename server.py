@@ -2,6 +2,7 @@ import threading
 import uuid
 import time
 import struct
+import random
 
 MAX_FRAMESIZE = 16384
 MAX_MESSAGESIZE = 63914560
@@ -15,7 +16,7 @@ class Graph:
 		self.comment = ""
 		self.presenceLifetime = 0
 		self.maxPresenceRecords = 0
-		self.maxRecordSize = 0;
+		self.maxRecordSize = 0
 		self.signatureRecord = ""
 		self.nodes = {}
 		self.records = {}
@@ -43,17 +44,17 @@ class Node:
 		self.records = {}
 		self.recordTypes = {}
 
-class ConnectionClosedException(exception):
+class ConnectionClosedException(Exception):
 	def __init__(self):
 		pass
 	
 
-class InvalidVersionException(exception):
+class InvalidVersionException(Exception):
 	def __init__(self):
 		pass
 	
 
-class PPGraphContact(Thread):
+class PPGraphContact(threading.Thread):
 	
 	
 	def __init__(self, ppgraph, socket, incoming = False):
@@ -70,7 +71,7 @@ class PPGraphContact(Thread):
 		self.sendFrameBuffer = "" # how much is remaining to send of a frame
 		self.incoming = incoming
 		self.recordsToPublish = [] # need lock before accessing
-		self.peerId = ""
+		self.peerId = -1
 		
 		self.socket.setTimeout(2)
 		
@@ -95,10 +96,9 @@ class PPGraphContact(Thread):
 		# update the PPGraph's data structures correctly with the new
 		# contact
 		
-		if self.incoming:
-			pass
-		else:
-			pass
+		if not self.incoming:
+			self.sendAuthInfo()
+			self.sendConnect()
 		
 		try:
 			while(True):
@@ -155,7 +155,7 @@ class PPGraphContact(Thread):
 			self.frameBuffer += x
 			
 			if len(self.frameBuffer) == 4:
-				self.frameSize, = struct.unpack("i", self.frameBuffer)
+				self.frameSize, = struct.unpack("!i", self.frameBuffer)
 
 				if self.frameSize < 0 or self.frameSize > MAX_FRAMESIZE:
 					raise ConnectionClosedException()
@@ -172,7 +172,7 @@ class PPGraphContact(Thread):
 				self.frameBuffer = ""
 				
 				if self.messageSize == -1:
-					self.messageSize, = struct.unpack("i", self.message[0 : 4])
+					self.messageSize, = struct.unpack("!i", self.message[0 : 4])
 					
 					if self.messageSize < 0 or self.messageSize > MAX_MESSAGESIZE:
 						raise ConnectionClosedException()
@@ -185,7 +185,7 @@ class PPGraphContact(Thread):
 	def parseMessage(self):
 		
 		# first determine if the version matches, then get the message type
-		messageVersion, messagetype = struct.unpack("BB", self.messageBuffer[4:8])
+		messageVersion, messagetype = struct.unpack("!BB", self.messageBuffer[4:8])
 		
 		if messageVersion != 16:
 			raise InvalidVersionException()
@@ -214,7 +214,7 @@ class PPGraphContact(Thread):
 					frameSize = len(self.sendBuffer[0])
 					frameSize += 4
 					
-					packStr = "i" + str(len(self.sendBuffer[0])) + "s"
+					packStr = "!i" + str(len(self.sendBuffer[0])) + "s"
 					
 					self.sendFrameBuffer = struct.pack(packStr, frameSize, self.sendBuffer[0])
 					self.sendBuffer.pop(0)
@@ -324,7 +324,7 @@ class PPGraphContact(Thread):
 # This is not the correct way to handle blocking sockets! this architecture should
 # either be non-blocking, or we kickoff a manager thread when a new socket is
 # established with a peer for sending/receiving data
-class PPGraph(Thread):
+class PPGraph(threading.Thread):
 	
 	
 	def __init__(self, secProvider, listenPort):
@@ -359,7 +359,6 @@ class PPGraph(Thread):
 			finally:
 				self.lock.release()
 				
-
 		
 	# adds a new socket, we don't know which graph it's for yet
 	def addConnection(self, socket):
@@ -368,7 +367,7 @@ class PPGraph(Thread):
 		newconn.start()
 		
 	
-	# join an existing graph, returns the GUID of the local node on success
+	# join an existing graph, returns the ID of the local node on success
 	def joinGraph(self, graphGUID, peerGUID, address, port, secProvider):
 		# return until after successful connection and
 		# authentication
@@ -376,7 +375,7 @@ class PPGraph(Thread):
 		graph = Graph()
 		graph.secProvider = secProvider
 		graph.scope = 0x00000003 
-		nodeID = self.genGUID()
+		nodeID = random.uniform(0, 9223372036854775807) #nodeid is a random 64bit int
 		graph.myGUID = nodeID
 		
 		socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -410,7 +409,7 @@ class PPGraph(Thread):
 	# create a new graph, returns the graph GUID, and local node Id
 	def createGraph(self, secProvider, name):
 		graphGUID = self.genGUID()
-		nodeID = self.genGUID()
+		nodeID = random.uniform(0, 9223372036854775807) #nodeid is a random 64bit int
 		
 		graph = Graph()
 		graph.secProvider = secProvider
@@ -538,7 +537,7 @@ class PPGraph(Thread):
 	def genGUID(self):
 		return UUID().bytes
 
-class Server(Thread):
+class Server(threading.Thread):
 	
 	def __init__(self, ppgraph, port):
 		self.myppGraph = ppgraph
