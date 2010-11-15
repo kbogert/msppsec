@@ -20,7 +20,7 @@ class Graph:
 		self.maxPresenceRecords = 0
 		self.maxRecordSize = 0
 		self.signatureRecord = ""
-		self.nodes = {} # nodeId : Node instace
+		self.nodes = {} # peerId : Node instance, built from presence records
 		self.records = {} # recordGUID : record
 		self.recordTypes = {} # recordTypeID : array of records
 		self.attributes = ""
@@ -36,20 +36,22 @@ class Record:
 		self.creator = ""
 		self.version = 1
 		self.modificationTime = 0
+		self.lastModifiedBy = ""
 		self.createdAt = 0
-		self.expireTime
+		self.expireTime = 0
 		self.data = ""
 		self.securityData = ""
 		self.attributes = ""
 	
 class Node:
 	def __init__(self):
-		self.peerId = ""
-		self.nodeId = 0
+		self.peerID = ""
+		self.nodeID = 0
 		self.addresses = []
 		self.attributes = ""
 		self.records = {}
 		self.recordTypes = {}
+		self.friendlyname = ""
 
 class ConnectionClosedException(Exception):
 	def __init__(self):
@@ -74,6 +76,7 @@ class PPGraphContact(threading.Thread):
 		self.frameSize = -1	
 		self.messageBuffer = ""
 		self.messageSize = -1
+		self.isSyncing = False
 		
 		self.sendBuffer = [] # messages broken up into frame sized chunks, need lock before accessing
 		self.sendFrameBuffer = "" # how much is remaining to send of a frame
@@ -260,6 +263,17 @@ class PPGraphContact(threading.Thread):
 			finally:
 				self.lock.release()
 	
+	def addToSendBuffer(self, message):
+		global MAX_FRAMESIZE
+		self.lock.acquire()
+		try:
+			while len(message) > 0:
+				self.sendBuffer.append(message[0:MAX_FRAMESIZE- 4])
+				message = message[MAX_FRAMESIZE- 4:]
+		finally:
+			self.lock.release()
+		
+	
 	def sendAuthInfo(self):
 		# called when trying to connect to a new node, basically to introduce myself
 		
@@ -274,51 +288,166 @@ class PPGraphContact(threading.Thread):
 		
 		message = struct.pack(formatStr, messageLen, 0x10, 1, 0x02, 16, 16 + len(graphIDstr), messageLen, graphIDstr, sourceIDstr )
 		
-		self.lock.acquire()
-		try:
-			self.sendBuffer.append(message)
-		finally:
-			self.lock.release()
-		
+		self.addToSendBuffer(message)		
 	
 	def sendConnect(self):
-		pass
+		formatStr = "!iBBxxxBHHxxQ"
+		
+		friendlyNamestr = self.ppgraph.graphs[self.graphGUID].friendlyName + chr(0)
+		
+		formatStr += str(len(friendlyNamestr)) + "s"
+		
+		messageLen = 24 + len(friendlyNamestr)
+		
+		message = struct.pack(formatStr, messageLen, 0x10, 2, 0, messageLen, 24, self.ppgraph.graphs[self.graphGUID].myNodeID, friendlyNamestr)
+		
+		self.addToSendBuffer(message)
+		
+		
 		
 	def sendWelcome(self):
-		pass
-	
-	def sendRefuse(self):
-		pass
-	
-	def sendDisconnect(self):
-		pass
 		
+		formatStr = "!iBBxxQQBxHHH"
+		
+		peerIDstr = self.ppgraph.graphs[self.graphGUID].myPeerID + chr(0)
+		
+		formatStr += str(len(peerIDstr)) + "s"
+		
+		messageLen = 40 + len(peerIDstr)
+		
+		message = struct.pack(formatStr, messageLen, 0x10, 3, self.ppgraph.graphs[self.graphGUID].myNodeID, int(time.time() * 1000), 0, messageLen, 40, messageLen, peerIDstr )
+		
+		self.addToSendBuffer(message)
+				
+		self.ppgraph.lock.acquire()
+		try:
+			self.ppgraph.graphs[self.graphGUID].contacts[self.nodeID] = self
+			
+		finally:
+			self.ppgraph.lock.release()
+		
+	# whyCodes:
+	# 1 = busy
+	# 2 = Already Connected on this connection
+	# 3 = Duplicate connection to an existing one
+	# 4 = Direct connection not allowed
+	def sendRefuse(self, whyCode):
+		
+		formatStr = "!iBBxxBBH"
+		
+		messageLen = 12
+		
+		message = struct.pack(formatStr, messageLen, 0x10, 4, whyCode, 0, messageLen )
+		
+		self.addToSendBuffer(message)
+		
+		
+	# whyCodes:
+	# 1 = I'm leaving the graph
+	# 2 = I'm performing maintenance, you're the least useful node
+	# 3 = Application requested a disconnect
+	def sendDisconnect(self, whyCode):
+		formatStr = "!iBBxxBBH"
+		
+		messageLen = 12
+		
+		message = struct.pack(formatStr, messageLen, 0x10, 5, whyCode, 0, messageLen )
+		
+		self.addToSendBuffer(message)
+		
+	
+	# synchronize all records for now
 	def sendSolicitNew(self):
-		pass
+		formatStr = "!iBBxxBBH"
 		
+		messageLen = 12
+		
+		message = struct.pack(formatStr, messageLen, 0x10, 6, 0, 0, messageLen )
+		
+		self.isSyncing = True
+		self.addToSendBuffer(message)
+	
+	# not implemented
 	def sendSolicitTime(self):
 		pass
 		
+	# not implemented
 	def sendSolicitHash(self):
 		pass
-		
+	
+	# not implemented
 	def sendAdvertise(self):
 		pass
-		
+	
+	# not implemented
 	def sendRequest(self):
 		pass
 	
-	def sendFlood(self):
-		pass
+	def sendFlood(self, record):
+		formatStr = "!iBBxxHxx"
+		
+		recordStr = ""
+		
+		recordFormat = "!16s16sIxxxxI" + str(len(record.creator) + 1) + "sI" + str(len(record.lastModifiedBy) + 1) + "s"
+		recordFormat += "I" + str(len(record.securityData)) + "sQQQI" + str(len(self.graphGUID) + 1) + "sHI" + str(len(record.data)) + "s"
+		
+		recordStr = struct.pack(recordFormat, record.typeID.bytes, record.guid.bytes, record.version, len(record.creator) + 1, record.creator + chr(0),
+					len(record.lastModifiedBy) + 1, record.lastModifiedBy + chr(0), len(record.securityData), record.securityData,
+					record.createdAt, record.expireTime, record.modificationTime, len(self.graphGUID) + 1, self.graphGUID + chr(0),
+					0x0100, len(record.data), record.data)
+
+		if len(record.attributes) > 0:
+			recordFormat = str(len(record.attributes)+1) + "s"
+			recordStr += struct.pack(recordFormat, len(record.attributes)+1, record.attributes)
+		else:
+			recordStr += chr(0) + chr(0) + chr(0) + chr(0)
+		
+		
+		formatStr += chr(len(recordStr)) + "s"	
+		messageLen = 12 + len(recordstr)
+		
+		message = struct.pack(formatStr, messageLen, 0x10, 0x0B, 12, recordStr )
+		
+		self.addToSendBuffer(message)
+		
 		
 	def sendSyncEnd(self):
-		pass
+		formatStr = "!iBBxxBxxx"
 		
-	def sendPT2PT(self):
-		pass
+		messageLen = 12
 		
-	def sendACK(self):
-		pass
+		message = struct.pack(formatStr, messageLen, 0x10, 0x0C, 1)
+		
+		self.addToSendBuffer(message)
+	
+	# sends a direct message to this peer, needs a uuid and string payload
+	def sendPT2PT(self, dataType, payload):
+		
+		formatStr = "!iBBxxHxx16s"
+		
+		formatStr += str(len(payload)) + "s"
+		
+		messageLen = 28 + len(payload)
+		
+		message = struct.pack(formatStr, messageLen, 0x10, 0x0D, 28, dataType.bytes, payload )
+		
+		self.addToSendBuffer(message)
+		
+	# send an acknowledgement for each record in the array
+	def sendACK(self, rcvdRecords):
+		formatStr = "!iBBxxHH" + str(24 * len(rcvdRecords)) + "s"
+		
+		recordStr = ""
+		
+		for record in rcvdRecords:
+			recordStr += record.guid.bytes + chr(0) + chr(0) + chr(0) + chr(1)
+		
+		
+		messageLen = 12 + len(recordstr)
+		
+		message = struct.pack(formatStr, messageLen, 0x10, 0x0E, len(rcvdRecords), 12, recordStr )
+		
+		self.addToSendBuffer(message)
 		
 		
 	# the other node is identifying itself, accept it
@@ -341,11 +470,55 @@ class PPGraphContact(threading.Thread):
 		print("The other peer is :" + self.peerID)
 		print("In the graph :" + self.graphGUID)
 	
+	# dummy implementation, only for testing
 	def rcvConnect(self):
-		pass
+		formatStr = "!iBBxxBBHHxx"
+		(messageLen, version, messageType, flags, addressCount, addressOffset, friendlyNameOffset) = struct.unpack(formatStr, self.messageBuffer[0:16])
+		if version != 0x10 or messageType != 0x02:
+			self.sendDisconnect()
+			return
+		
+		nodeID = struct.unpack("Q", self.messageBuffer[16:24])
+		friendlyName = self.messageBuffer[friendlyNameOffset:]
+		friendlyName = friendlyName[:len(friendlyName) -1]
+		
+		self.nodeID = nodeID
+		
+		print("The other node is :" + str(self.nodeID))
+		print("Whose Name is :" + friendlyName)
+		
+		self.sendWelcome()
+	
 	
 	# also needs to notify the waiting ppsec thread
 	def rcvWelcome(self):
+		formatStr = "!iBBxxQQBxHHH"
+		(messageLen, version, messageType, nodeID, peerTime, addressCount, addressOffset, peerIDoffset, friendlyNameOffset) = struct.unpack(formatStr, self.messageBuffer[0:32])
+		if version != 0x10 or messageType != 0x03:
+			self.sendDisconnect()
+			return
+		
+		peerID = self.messageBuffer[peerIDoffset:friendlyNameOffset-1]
+		friendlyName = self.messageBuffer[friendlyNameOffset:]
+		friendlyName = friendlyName[:len(friendlyName) -1]
+		
+		self.nodeID = nodeID
+		self.peerID = peerID
+		
+		self.ppgraph.lock.acquire()
+		try:
+			self.ppgraph.graphs[self.graphGUID].contacts[self.nodeID] = self
+#			self.ppgraph.graphs[self.graphGUID].peerTime = peerTime
+			
+		finally:
+			self.ppgraph.lock.release()
+		
+		print("The other node is :" + str(self.nodeID))		
+		print("Whose PeerID is :" + self.peerID)
+		print("Whose Name is :" + friendlyName)		
+		
+		
+		# extract nodeid, peer time, peer id, and friendly name (if available)
 		
 		# be sure the contact is added to the graph structure before we get here!
 		self.lock.acquire()
@@ -354,6 +527,8 @@ class PPGraphContact(threading.Thread):
 			self.lock.notifyAll()
 		finally:
 			self.lock.release()
+			
+		self.sendSolicitNew()
 			
 	# also needs to notify the waiting ppsec thread
 	def rcvRefuse(self):
@@ -364,33 +539,153 @@ class PPGraphContact(threading.Thread):
 		finally:
 			self.lock.release()
 	
+		raise Exception("Received a refuse message")
+		
 	def rcvDisconnect(self):
-		pass
-	    
-	def rcvSolicitNew(self):
-		pass
-		
-	def rcvSolicitTime(self):
-		pass
-		
-	def rcvSolicitHash(self):
-		pass
-		
-	def rcvAdvertise(self):
-		pass
-		
-	def rcvRequest(self):
-		pass
+		raise Exception("Received a disconnect message")
 	
+	# loop through all the records we have, flooding the peer
+	# dummy implementation, ignores the inclusion and exclusion settings
+	def rcvSolicitNew(self):
+		self.ppgraph.lock.acquire()
+		try:
+			for (recordID, record) in self.ppgraph.graphs[self.graphGUID].records:
+				self.sendFlood(record)
+		finally:
+			self.ppgraph.lock.release()
+			
+		self.sendSyncEnd()
+	
+	# not implemented, causes disconnect
+	def rcvSolicitTime(self):
+		self.sendDisconnect(3)
+	
+	# not implemented, causes disconnect
+	def rcvSolicitHash(self):
+		self.sendDisconnect(3)
+	
+	# not implemented, causes disconnect	
+	def rcvAdvertise(self):
+		self.sendDisconnect(3)
+	
+	# not implemented, causes disconnect
+	def rcvRequest(self):
+		self.sendDisconnect(3)
+	
+	# stupid implementation, sends an ack for each flood received
 	def rcvFlood(self):
-		pass
+		formatStr = "!iBBxxHxx"
+		(messageLen, version, messageType, dataOffset) = struct.unpack(formatStr, self.messageBuffer[0:12])
+		if version != 0x10 or messageType != 0x0B:
+			self.sendDisconnect()
+			return
+		
+		
+		recordStr = self.messageBuffer[dataOffset:]
+		
+		recordFormat = "!16s16sIxxxxI"
+		record = Record()
+		
+		(recordType, recordId, record.version, creatorLength) = struct.unpack(recordFormat, recordStr[0:44])
+		record.typeID = uuid.UUID(bytes=recordType)
+		record.guid = uuid.UUID(butes=recordId)
+		
+		record.creator = recordStr[44:44 + creatorLength - 1]
+		
+		cursor = 44 + creatorLength
+		(lastModifiedIDLength) = struct.unpack("I", recordStr[cursor: cursor + 4])
+		cursor += 4
+		record.lastModifiedBy = recordStr[cursor:cursor + lastModifiedIDLength - 1]
+		
+		cursor += lastModifiedIDLength
+		(securityDataLength) = struct.unpack("I", recordStr[cursor: cursor + 4])
+		cursor += 4
+		record.securityData = recordStr[cursor:cursor + securityDataLength - 1]
+		
+		cursor += securityDataLength
+		(record.createdAt, record.expireTime, record.modificationTime) = struct.unpack("QQQ", recordStr[cursor:cursor+24])
+		
+		cursor += 24
+		(graphIDLength) = struct.unpack("I", recordStr[cursor: cursor + 4])
+		cursor += 4
+		graphID = recordStr[cursor:cursor + graphIDLength - 1]
+		
+		if graphID != self.graphGUID:
+			self.sendDisconnect()
+			return
+		
+		cursor += graphIDLength
+		(protocolVersion, payloadSize) = struct.unpack("HI", recordStr[cursor:cursor+6])
+		cursor += 6
+		record.data = recordStr[cursor:cursor+payloadSize]
+		
+		cursor += payloadSize
+		(attributesLength) = struct.unpack("I", recordStr[cursor:cursor+4])
+		cursor += 4
+		if (attributesLength > 0):
+			record.attributes = recordStr[cursor:cursor + attributesLength - 1]
+		
+		
+		# check for the 4 special type of records
+		if record.typeID.hex == "00000100000000000000000000000000":
+			# graph info record
+			pass
+		if record.typeID.hex == "00000200000000000000000000000000":
+			# graph signature record
+			pass
+		if record.typeID.hex == "00000300000000000000000000000000":
+			# contact record
+			pass
+		if record.typeID.hex == "00000400000000000000000000000000":
+			# presence record
+			pass
+
+		
+		# store in our database
+		self.ppgraph.lock.acquire()
+		try:
+			self.ppgraph[self.graphGUID].records[record.guid] = record
+			
+			if not self.ppgraph[self.graphGUID].recordTypes.has_key(record.typeID):	
+				self.ppgraph[self.graphGUID].recordTypes[record.typeID] = []
+			self.ppgraph[self.graphGUID].recordTypes[record.typeID].append(record)
+			
+			if not self.ppgraph[self.graphGUID].nodes.has_key(record.creator):
+				self.ppgraph[self.graphGUID].nodes[record.creator] = Node()
+				self.ppgraph[self.graphGUID].nodes[record.creator].peerId
+			self.ppgraph[self.graphGUID].nodes[record.creator].records[record.guid] = record
+			
+			if not self.ppgraph[self.graphGUID].nodes[record.creator].recordTypes.has_key(record.typeID):	
+				self.ppgraph[self.graphGUID].nodes[record.creator].recordTypes[record.typeID] = []
+			self.ppgraph[self.graphGUID].nodes[record.creator].recordTypes[record.typeID].append(record)
+		finally:
+			self.ppgraph.lock.release()
+		
+		
+		if not self.isSyncing:
+			self.sendACK([record])
 		
 	def rcvSyncEnd(self):
-		pass
+		self.isSyncing = False
 		
 	def rcvPT2PT(self):
-		pass
+		formatStr = "!iBBxxHxx16s"
+		(messageLen, version, messageType, dataOffset, dataType) = struct.unpack(formatStr, self.messageBuffer[0:28])
+		if version != 0x10 or messageType != 0x0D:
+			self.sendDisconnect()
+			return
 		
+		messageGUID = uuid.UUID(bytes=dataType)
+		
+		if messageGUID.hex == "0ccbb0d2be414bd6914b058ec5dcce64":
+			# message is a ping
+			# ignore for now
+			return
+		
+		# otherwise it's meant for the application, call the callback
+		# TODO implement callback for direct messages
+			
+	# good to know
 	def rcvACK(self):
 		pass
 
@@ -440,7 +735,7 @@ class PPGraph(threading.Thread):
 		
 	
 	# throws exception on failure
-	def joinGraph(self, graphGUID, localPeerID, address, port, secProvider):
+	def joinGraph(self, graphGUID, localPeerID, address, port, secProvider, friendlyName):
 		# return until after successful connection and
 		# authentication
 		localNodeID = random.uniform(0, 9223372036854775807) #nodeid is a random 64bit int
@@ -450,6 +745,7 @@ class PPGraph(threading.Thread):
 		graph.scope = 0x00000003 
 		graph.myNodeID = localNodeID
 		graph.myPeerID = localPeerID
+		graph.friendlyName = friendlyName
 		
 		s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		s.connect((address, port))
@@ -512,15 +808,17 @@ class PPGraph(threading.Thread):
 	# publish data of type recordTypeId to all members of the graph, returns
 	# the record's GUID
 	def publish(self, graphId, recordTypeId, data):
-		guid = self.genGUID()
+		guid = self.genGUID() # TODO DO THIS THE RIGHT WAY!
 		
 		newRecord = Record()
 		newRecord.attributes = ""
-		newRecord.createdAt = time.gmtime()
+		newRecord.createdAt = int(time.time() * 1000)
 		newRecord.creator = self.peerId
+		newRecord.lastModifiedBy = self.peerId
 		newRecord.data = data
 		newRecord.guid = guid
-		newRecord.timestamp = 0
+		newRecord.modificationTime = int(time.time() * 1000)
+		newRecord.expireTime = int(time.time() * 1000) + 1000 * 86400
 		newRecord.typeID = recordTypeId
 		
 		self.lock.acquire()
@@ -528,7 +826,9 @@ class PPGraph(threading.Thread):
 			if not self.graphs.has_key(graphId):
 				return nil
 			
+			
 			graphstruct = self.graphs.get(graphId)
+
 			graphstruct.records[guid] = newRecord
 			graphstruct.recordTypes[recordTypeId].append(newRecord)
 			
