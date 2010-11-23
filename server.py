@@ -5,6 +5,8 @@ import struct
 import random
 import socket
 import sys
+import traceback
+import hashlib
 
 MAX_FRAMESIZE = 16384
 MAX_MESSAGESIZE = 63914560
@@ -20,7 +22,7 @@ class Graph:
 		self.maxPresenceRecords = 0
 		self.maxRecordSize = 0
 		self.signatureRecord = ""
-		self.nodes = {} # peerId : Node instance, built from presence records
+		self.nodeRecords = {} # peerId : array of records
 		self.records = {} # recordGUID : record
 		self.recordTypes = {} # recordTypeID : array of records
 		self.attributes = ""
@@ -84,6 +86,7 @@ class PPGraphContact(threading.Thread):
 		self.recordsToPublish = [] # need lock before accessing
 		self.nodeID = -1 # nodeid of this contact
 		self.peerID = "" # peerid of this contact
+		self.connectionState = "UnAuth"
 		
 		self.socket.settimeout(2)
 		
@@ -133,16 +136,19 @@ class PPGraphContact(threading.Thread):
 				except (socket.timeout):
 					pass
 				
+				recordsToFlood = []
 				# check for new data to publish
-				performFlood = False
 				self.lock.acquire()
 				try:
-					if len(self.recordsToPublish) > 0:
-						performFlood = True
+					for record in self.recordsToPublish:
+						recordsToFlood.append(record)
+						
+					self.recordsToPublish = []
 				finally:
 					self.lock.release()
-				if performFlood:
-					self.sendFlood()
+					
+				for record in recordsToFlood:
+					self.sendFlood(record)
 				
 				# TODO check for data to update	
 					
@@ -153,9 +159,11 @@ class PPGraphContact(threading.Thread):
 				
 		except:
 			if self.incoming:
-				print("ReceivingSide Error: ", sys.exc_info()[1])
+				print("ReceivingSide Error: " + traceback.format_exc())
+				
 			else:				
-				print("SendingSide Error: ", sys.exc_info()[1])
+				print("SendingSide Error: " + traceback.format_exc())
+				
 		
 		# close the socket, remove myself from the graph
 		self.socket.shutdown(socket.SHUT_RDWR)
@@ -225,6 +233,10 @@ class PPGraphContact(threading.Thread):
 
 	def parseMessage(self):
 		
+		if self.connectionState != "UnAuth":
+			if self.ppgraph.graphs[self.graphGUID].secProvider != None:
+				self.messageBuffer = self.ppgraph.graphs[self.graphGUID].secProvider.decrypt(self.messageBuffer)
+		
 		# first determine if the version matches, then get the message type
 		messageVersion, messagetype = struct.unpack("!BB", self.messageBuffer[4:6])
 		
@@ -265,6 +277,11 @@ class PPGraphContact(threading.Thread):
 	
 	def addToSendBuffer(self, message):
 		global MAX_FRAMESIZE
+		
+		if self.connectionState != "UnAuth":
+			if self.ppgraph.graphs[self.graphGUID].secProvider != None:
+				message = self.ppgraph.graphs[self.graphGUID].secProvider.encrypt(message)
+		
 		self.lock.acquire()
 		try:
 			while len(message) > 0:
@@ -288,7 +305,14 @@ class PPGraphContact(threading.Thread):
 		
 		message = struct.pack(formatStr, messageLen, 0x10, 1, 0x02, 16, 16 + len(graphIDstr), messageLen, graphIDstr, sourceIDstr )
 		
-		self.addToSendBuffer(message)		
+		self.addToSendBuffer(message)
+		
+		if self.ppgraph.graphs[self.graphGUID].secProvider != None:
+			if not self.ppgraph.graphs[self.graphGUID].secProvider.authenticateOutgoing(self.socket):
+				raise Exception("Authentication Failed")
+				
+		self.connectionState = "Auth"
+		
 	
 	def sendConnect(self):
 		formatStr = "!iBBxxxBHHxxQ"
@@ -313,9 +337,9 @@ class PPGraphContact(threading.Thread):
 		
 		formatStr += str(len(peerIDstr)) + "s"
 		
-		messageLen = 40 + len(peerIDstr)
+		messageLen = 32 + len(peerIDstr)
 		
-		message = struct.pack(formatStr, messageLen, 0x10, 3, self.ppgraph.graphs[self.graphGUID].myNodeID, int(time.time() * 1000), 0, messageLen, 40, messageLen, peerIDstr )
+		message = struct.pack(formatStr, messageLen, 0x10, 3, self.ppgraph.graphs[self.graphGUID].myNodeID, int(time.time() * 1000), 0, messageLen, 32, messageLen, peerIDstr )
 		
 		self.addToSendBuffer(message)
 				
@@ -325,6 +349,8 @@ class PPGraphContact(threading.Thread):
 			
 		finally:
 			self.ppgraph.lock.release()
+		
+		print("Welcome Sent!")
 		
 	# whyCodes:
 	# 1 = busy
@@ -403,10 +429,11 @@ class PPGraphContact(threading.Thread):
 			recordStr += chr(0) + chr(0) + chr(0) + chr(0)
 		
 		
-		formatStr += chr(len(recordStr)) + "s"	
-		messageLen = 12 + len(recordstr)
+#		formatStr += len(recordStr) + "s"	
+		messageLen = 12 + len(recordStr)
 		
-		message = struct.pack(formatStr, messageLen, 0x10, 0x0B, 12, recordStr )
+		message = struct.pack(formatStr, messageLen, 0x10, 0x0B, 12 )
+		message += recordStr
 		
 		self.addToSendBuffer(message)
 		
@@ -443,7 +470,7 @@ class PPGraphContact(threading.Thread):
 			recordStr += record.guid.bytes + chr(0) + chr(0) + chr(0) + chr(1)
 		
 		
-		messageLen = 12 + len(recordstr)
+		messageLen = 12 + len(recordStr)
 		
 		message = struct.pack(formatStr, messageLen, 0x10, 0x0E, len(rcvdRecords), 12, recordStr )
 		
@@ -469,7 +496,14 @@ class PPGraphContact(threading.Thread):
 		self.peerID = sourceID
 		print("The other peer is :" + self.peerID)
 		print("In the graph :" + self.graphGUID)
-	
+		
+				
+		if self.ppgraph.graphs[self.graphGUID].secProvider != None:
+			if not self.ppgraph.graphs[self.graphGUID].secProvider.authenticateIncoming(sourceID, graphID, self.socket):
+				raise Exception("Authentication Failed")
+		
+		self.connectionState = "Auth"
+			
 	# dummy implementation, only for testing
 	def rcvConnect(self):
 		formatStr = "!iBBxxBBHHxx"
@@ -478,7 +512,7 @@ class PPGraphContact(threading.Thread):
 			self.sendDisconnect()
 			return
 		
-		nodeID = struct.unpack("Q", self.messageBuffer[16:24])
+		(nodeID,) = struct.unpack("Q", self.messageBuffer[16:24])
 		friendlyName = self.messageBuffer[friendlyNameOffset:]
 		friendlyName = friendlyName[:len(friendlyName) -1]
 		
@@ -588,25 +622,27 @@ class PPGraphContact(threading.Thread):
 		
 		(recordType, recordId, record.version, creatorLength) = struct.unpack(recordFormat, recordStr[0:44])
 		record.typeID = uuid.UUID(bytes=recordType)
-		record.guid = uuid.UUID(butes=recordId)
-		
+		record.guid = uuid.UUID(bytes=recordId)
 		record.creator = recordStr[44:44 + creatorLength - 1]
 		
+		
 		cursor = 44 + creatorLength
-		(lastModifiedIDLength) = struct.unpack("I", recordStr[cursor: cursor + 4])
+		(lastModifiedIDLength,) = struct.unpack("!I", recordStr[cursor: cursor + 4])
 		cursor += 4
-		record.lastModifiedBy = recordStr[cursor:cursor + lastModifiedIDLength - 1]
+		if lastModifiedIDLength > 0:
+			record.lastModifiedBy = recordStr[cursor:cursor + lastModifiedIDLength - 1]
 		
 		cursor += lastModifiedIDLength
-		(securityDataLength) = struct.unpack("I", recordStr[cursor: cursor + 4])
+		(securityDataLength,) = struct.unpack("!I", recordStr[cursor: cursor + 4])
 		cursor += 4
-		record.securityData = recordStr[cursor:cursor + securityDataLength - 1]
+		if securityDataLength > 0:
+			record.securityData = recordStr[cursor:cursor + securityDataLength - 1]
 		
 		cursor += securityDataLength
-		(record.createdAt, record.expireTime, record.modificationTime) = struct.unpack("QQQ", recordStr[cursor:cursor+24])
+		(record.createdAt, record.expireTime, record.modificationTime) = struct.unpack("!QQQ", recordStr[cursor:cursor+24])
 		
 		cursor += 24
-		(graphIDLength) = struct.unpack("I", recordStr[cursor: cursor + 4])
+		(graphIDLength,) = struct.unpack("!I", recordStr[cursor: cursor + 4])
 		cursor += 4
 		graphID = recordStr[cursor:cursor + graphIDLength - 1]
 		
@@ -615,12 +651,12 @@ class PPGraphContact(threading.Thread):
 			return
 		
 		cursor += graphIDLength
-		(protocolVersion, payloadSize) = struct.unpack("HI", recordStr[cursor:cursor+6])
+		(protocolVersion, payloadSize) = struct.unpack("!HI", recordStr[cursor:cursor+6])
 		cursor += 6
 		record.data = recordStr[cursor:cursor+payloadSize]
 		
 		cursor += payloadSize
-		(attributesLength) = struct.unpack("I", recordStr[cursor:cursor+4])
+		(attributesLength,) = struct.unpack("!I", recordStr[cursor:cursor+4])
 		cursor += 4
 		if (attributesLength > 0):
 			record.attributes = recordStr[cursor:cursor + attributesLength - 1]
@@ -629,41 +665,86 @@ class PPGraphContact(threading.Thread):
 		# check for the 4 special type of records
 		if record.typeID.hex == "00000100000000000000000000000000":
 			# graph info record
-			pass
+			self.parseGraphInfo(record.data)
 		if record.typeID.hex == "00000200000000000000000000000000":
 			# graph signature record
-			pass
+			self.parseSignature(record.data)
 		if record.typeID.hex == "00000300000000000000000000000000":
 			# contact record
-			pass
+			self.parseContact(record.data)
 		if record.typeID.hex == "00000400000000000000000000000000":
 			# presence record
-			pass
+			self.parsePresence(record.data)
 
 		
 		# store in our database
 		self.ppgraph.lock.acquire()
 		try:
-			self.ppgraph[self.graphGUID].records[record.guid] = record
+			self.ppgraph.graphs[self.graphGUID].records[record.guid] = record
 			
-			if not self.ppgraph[self.graphGUID].recordTypes.has_key(record.typeID):	
-				self.ppgraph[self.graphGUID].recordTypes[record.typeID] = []
-			self.ppgraph[self.graphGUID].recordTypes[record.typeID].append(record)
+			if not self.ppgraph.graphs[self.graphGUID].recordTypes.has_key(record.typeID):	
+				self.ppgraph.graphs[self.graphGUID].recordTypes[record.typeID] = []
+			self.ppgraph.graphs[self.graphGUID].recordTypes[record.typeID].append(record)
 			
-			if not self.ppgraph[self.graphGUID].nodes.has_key(record.creator):
-				self.ppgraph[self.graphGUID].nodes[record.creator] = Node()
-				self.ppgraph[self.graphGUID].nodes[record.creator].peerId
-			self.ppgraph[self.graphGUID].nodes[record.creator].records[record.guid] = record
+			if not self.ppgraph.graphs[self.graphGUID].nodeRecords.has_key(record.creator):
+				self.ppgraph.graphs[self.graphGUID].nodeRecords[record.creator] = []
+			self.ppgraph.graphs[self.graphGUID].nodeRecords[record.creator].append(record)
 			
-			if not self.ppgraph[self.graphGUID].nodes[record.creator].recordTypes.has_key(record.typeID):	
-				self.ppgraph[self.graphGUID].nodes[record.creator].recordTypes[record.typeID] = []
-			self.ppgraph[self.graphGUID].nodes[record.creator].recordTypes[record.typeID].append(record)
 		finally:
 			self.ppgraph.lock.release()
 		
 		
 		if not self.isSyncing:
 			self.sendACK([record])
+		
+	def parseGraphInfo(self, record):
+		
+		graphData = self.ppgraph.graphs[self.graphGUID]
+		
+		formatStr = "!ixxxxII"
+		(messageLen, scope, graphIDLength) = struct.unpack(formatStr, record[0:16])		
+		
+		graphData.scope = scope
+		
+		cursor = 16
+		graphID = record[cursor:cursor + graphIDLength - 1]
+		cursor += graphIDLength
+		
+		(creatorIDLength, ) = struct.unpack("!I", record[cursor: cursor + 4])
+		cursor += 4
+		graphData.creatorID = record[cursor:cursor + creatorIDLength - 1]
+		cursor += creatorIDLength
+		
+		(friendlyNameLength, ) = struct.unpack("!I", record[cursor: cursor + 4])
+		cursor += 4
+		graphData.friendlyName = record[cursor:cursor + friendlyNameLength - 1]
+		cursor += friendlyNameLength
+		
+		(commentLength, ) = struct.unpack("!I", record[cursor: cursor + 4])
+		cursor += 4
+		if commentLength > 0:
+			graphData.comment = record[cursor:cursor + commentLength - 1]
+		cursor += commentLength
+		
+		(presenceLifetime, maxPresences, maxRecordSize) = struct.unpack("!III", record[cursor: cursor+12])
+		
+		graphData.presenceLifetime = presenceLifetime
+		graphData.maxPresenceRecords = maxPresences
+		graphData.maxRecordSize = maxRecordSize
+	
+	def parseSignature(self, record):
+		(graphSignature, ) = struct.unpack("!Q", record)
+		
+		self.ppgraph.graphs[self.graphGUID].signatureRecord = graphSignature
+	
+	# ignored for now
+	def parseContact(self, record):
+		pass
+		
+	
+	# ignored for now
+	def parsePresence(self, record):
+		pass
 		
 	def rcvSyncEnd(self):
 		self.isSyncing = False
@@ -683,8 +764,9 @@ class PPGraphContact(threading.Thread):
 			return
 		
 		# otherwise it's meant for the application, call the callback
-		# TODO implement callback for direct messages
-			
+		if not self.ppgraph.graphs[self.graphGUID].secProvider == None:
+			secProvider.directMessageCallback(self.messageBuffer[28:])
+	
 	# good to know
 	def rcvACK(self):
 		pass
@@ -696,8 +778,7 @@ class PPGraph(threading.Thread):
 		self.listenPort = listenPort
 		self.lock = threading.Lock()
 		self.serverThread = 0
-		self.peerId = ""
-		
+
 		self.graphs = {}
 		
 		threading.Thread.__init__(self)
@@ -747,6 +828,8 @@ class PPGraph(threading.Thread):
 		graph.myPeerID = localPeerID
 		graph.friendlyName = friendlyName
 		
+		# TODO create node entry for myself
+		
 		s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		s.connect((address, port))
 		
@@ -774,7 +857,7 @@ class PPGraph(threading.Thread):
 		finally:
 			self.lock.release()
 			
-		# TODO start a synchronization of the database
+		# TODO publish presence records for myself
 		
 	
 	def createGraph(self, graphGUID, localPeerID, secProvider, friendlyName):
@@ -790,6 +873,7 @@ class PPGraph(threading.Thread):
 		graph.myNodeID = localNodeID
 		graph.myPeerID = localPeerID
 		
+		# TODO create node entry for myself
 		# TODO create default records for the graph:
 		
 		# graph info
@@ -808,51 +892,75 @@ class PPGraph(threading.Thread):
 	# publish data of type recordTypeId to all members of the graph, returns
 	# the record's GUID
 	def publish(self, graphId, recordTypeId, data):
-		guid = self.genGUID() # TODO DO THIS THE RIGHT WAY!
-		
-		newRecord = Record()
-		newRecord.attributes = ""
-		newRecord.createdAt = int(time.time() * 1000)
-		newRecord.creator = self.peerId
-		newRecord.lastModifiedBy = self.peerId
-		newRecord.data = data
-		newRecord.guid = guid
-		newRecord.modificationTime = int(time.time() * 1000)
-		newRecord.expireTime = int(time.time() * 1000) + 1000 * 86400
-		newRecord.typeID = recordTypeId
-		
 		self.lock.acquire()
 		try:
 			if not self.graphs.has_key(graphId):
-				return nil
-			
+				return None
 			
 			graphstruct = self.graphs.get(graphId)
 
+			guid = self.genGUID()
+			
+			lowpart = ""
+			lowpart += chr(ord(guid.bytes[0]) ^ ord(guid.bytes[8]))
+			lowpart += chr(ord(guid.bytes[1]) ^ ord(guid.bytes[9]))
+			lowpart += chr(ord(guid.bytes[2]) ^ ord(guid.bytes[10]))
+			lowpart += chr(ord(guid.bytes[3]) ^ ord(guid.bytes[11]))
+			lowpart += chr(ord(guid.bytes[4]) ^ ord(guid.bytes[12]))
+			lowpart += chr(ord(guid.bytes[5]) ^ ord(guid.bytes[13]))
+			lowpart += chr(ord(guid.bytes[6]) ^ ord(guid.bytes[14]))
+			lowpart += chr(ord(guid.bytes[7]) ^ ord(guid.bytes[15]))
+			
+			hash = hashlib.md5(graphstruct.myPeerID).digest()
+			highpart = ""
+			highpart += chr(ord(hash[0]) ^ ord(hash[8]))
+			highpart += chr(ord(hash[1]) ^ ord(hash[9]))
+			highpart += chr(ord(hash[2]) ^ ord(hash[10]))
+			highpart += chr(ord(hash[3]) ^ ord(hash[11]))
+			highpart += chr(ord(hash[4]) ^ ord(hash[12]))
+			highpart += chr(ord(hash[5]) ^ ord(hash[13]))
+			highpart += chr(ord(hash[6]) ^ ord(hash[14]))
+			highpart += chr(ord(hash[7]) ^ ord(hash[15]))
+			
+			guid = uuid.UUID(bytes=(highpart + lowpart))
+			newRecord = Record()
+			newRecord.attributes = ""
+			newRecord.createdAt = int(time.time() * 1000)
+			newRecord.creator = graphstruct.myPeerID
+			newRecord.lastModifiedBy = graphstruct.myPeerID
+			newRecord.data = data
+			newRecord.guid = guid
+			newRecord.modificationTime = int(time.time() * 1000)
+			newRecord.expireTime = int(time.time() * 1000) + 1000 * 86400
+			newRecord.typeID = recordTypeId
+		
 			graphstruct.records[guid] = newRecord
+			if not graphstruct.recordTypes.has_key(recordTypeId):
+				graphstruct.recordTypes[recordTypeId] = []
 			graphstruct.recordTypes[recordTypeId].append(newRecord)
 			
-			if self.peerId in graphstruct.contacts:
-				graphstruct.contacts[self.peerId].records[guid] = newRecord				
-				graphstruct.contacts[self.peerId].recordTypes[recordTypeId].append(newRecord)
+			if not graphstruct.nodeRecords.has_key(graphstruct.myPeerID):
+				graphstruct.nodeRecords[graphstruct.myPeerID] = []
+				
+			graphstruct.nodeRecords[graphstruct.myPeerID].append(newRecord)
 			
-			for (peerId, contactStruct) in graphstruct.contacts:
+			for (NodeID, contactStruct) in graphstruct.contacts.items():
 				contactStruct.publish(newRecord)
 				
 			return guid
 		finally:
 			self.lock.release()
-		return nil
+		return None
 	
 	# retrieve the given record from the given graph
 	def get(self, graphId, recordId):
 		self.lock.acquire()
 		try:
 			if not self.graphs.has_key(graphId):
-				return nil
+				return None
 			
 			if not self.graphs.get(graphId).records.has_key(recordId):
-				return nil
+				return None
 			
 			return self.graphs.get(graphId).records.get(recordId)
 		finally:
@@ -863,7 +971,7 @@ class PPGraph(threading.Thread):
 		self.lock.acquire()
 		try:
 			if not self.graphs.has_key(graphId):
-				return nil
+				return None
 			
 			if not self.graphs.get(graphId).recordTypes.has_key(recordId):
 				return []
@@ -877,12 +985,12 @@ class PPGraph(threading.Thread):
 		self.lock.acquire()
 		try:
 			if not self.graphs.has_key(graphId):
-				return nil
+				return None
 			
-			if not self.graphs.get(graphId).nodes.has_key(peerId):
-				return nil
+			if not self.graphs.get(graphId).nodeRecords.has_key(peerId):
+				return None
 			
-			return self.graphs.get(graphId).nodes.get(peerId).recordTypes.keys()
+			return set([i.typeID for i in self.graphs.get(graphId).nodeRecords.get(peerId)])
 		finally:
 			self.lock.release()
 	
@@ -891,12 +999,12 @@ class PPGraph(threading.Thread):
 		self.lock.acquire()
 		try:
 			if not self.graphs.has_key(graphId):
-				return nil
+				return None
 			
-			if not self.graphs.get(graphId).nodes.has_key(peerId):
-				return nil
+			if not self.graphs.get(graphId).nodeRecords.has_key(peerId):
+				return None
 			
-			return self.graphs.get(graphId).nodes.get(peerId).records
+			return self.graphs.get(graphId).nodeRecords.get(peerId)
 		finally:
 			self.lock.release()
 	
@@ -905,15 +1013,15 @@ class PPGraph(threading.Thread):
 		self.lock.acquire()
 		try:
 			if not self.graphs.has_key(graphId):
-				return nil
+				return None
 			
-			return self.graphs.get(graphId).nodes.keys()
+			return self.graphs.get(graphId).nodeRecords.keys()
 		finally:
 			self.lock.release()
 		
 	# return a 
 	def genGUID(self):
-		return UUID().bytes
+		return uuid.uuid4()
 
 class Server(threading.Thread):
 	

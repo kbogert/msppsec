@@ -19,4 +19,4 @@ time.sleep(4)
 joiner = server.PPGraph( port2 )
 joiner.start()
 
-joiner.joinGraph("The Graph's ID", "I'm the Joiner", "localhost", port1, None)
+joiner.joinGraph("The Graph's ID", "I'm the Joiner", "localhost", port1, None, "Ken's Laptop")
