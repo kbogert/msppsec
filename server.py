@@ -88,7 +88,7 @@ class PPGraphContact(threading.Thread):
 		self.peerID = "" # peerid of this contact
 		self.connectionState = "UnAuth"
 		
-		self.socket.settimeout(2)
+		self.socket.settimeout(.2)
 		
 		self.recvMap = {1 : self.rcvAuthInfo,
 				2 : self.rcvConnect,
@@ -113,6 +113,7 @@ class PPGraphContact(threading.Thread):
 		# contact
 		
 		if not self.incoming:
+			print("about to send auth info")
 			self.sendAuthInfo()
 			try:
 				self.send()
@@ -156,7 +157,8 @@ class PPGraphContact(threading.Thread):
 				
 					
 				# if no response to ping, destroy connection
-				
+		except ConnectionClosedException:
+			pass
 		except:
 			if self.incoming:
 				print("ReceivingSide Error: " + traceback.format_exc())
@@ -196,15 +198,16 @@ class PPGraphContact(threading.Thread):
 		global MAX_MESSAGESIZE
 			
 		if self.frameSize == -1:
-			x = self.socket.recv(4 - len(self.frameBuffer))
+			x = self.socket.recv(2 - len(self.frameBuffer))
 			
 			if len(x) == 0:
 				raise ConnectionClosedException()
 			self.frameBuffer += x
 			
-			if len(self.frameBuffer) == 4:
-				self.frameSize, = struct.unpack("!i", self.frameBuffer)
-
+			if len(self.frameBuffer) == 2:
+				self.frameSize, = struct.unpack("!H", self.frameBuffer)
+				self.frameBuffer = ""
+				
 				if self.frameSize < 0 or self.frameSize > MAX_FRAMESIZE:
 					raise ConnectionClosedException()
 		else:
@@ -215,7 +218,7 @@ class PPGraphContact(threading.Thread):
 			self.frameBuffer += x
 			
 			if len(self.frameBuffer) == self.frameSize:
-				self.messageBuffer += self.frameBuffer[4 : ]
+				self.messageBuffer += self.frameBuffer
 				self.frameSize = -1
 				self.frameBuffer = ""
 				
@@ -265,9 +268,8 @@ class PPGraphContact(threading.Thread):
 				if len(self.sendBuffer) > 0:
 					# add on the framesize to the front of the frame
 					frameSize = len(self.sendBuffer[0])
-					frameSize += 4
 					
-					packStr = "!i" + str(len(self.sendBuffer[0])) + "s"
+					packStr = "!H" + str(len(self.sendBuffer[0])) + "s"
 					
 					self.sendFrameBuffer = struct.pack(packStr, frameSize, self.sendBuffer[0])
 					self.sendBuffer.pop(0)
@@ -296,14 +298,14 @@ class PPGraphContact(threading.Thread):
 		
 		formatStr = "!iBBxxBxHHH"
 		
-		graphIDstr = self.graphGUID + chr(0)
-		sourceIDstr = self.ppgraph.graphs[self.graphGUID].myPeerID + chr(0)
+		graphIDstr = self.graphGUID
+		sourceIDstr = self.ppgraph.graphs[self.graphGUID].myPeerID
 		
 		formatStr += str(len(graphIDstr)) + "s" + str(len(sourceIDstr)) + "s"
 		
 		messageLen = 16 + len(graphIDstr) + len(sourceIDstr)
 		
-		message = struct.pack(formatStr, messageLen, 0x10, 1, 0x02, 16, 16 + len(graphIDstr), messageLen, graphIDstr, sourceIDstr )
+		message = struct.pack(formatStr, messageLen, 0x10, 1, 0x01, 16, 16 + len(graphIDstr), messageLen, graphIDstr, sourceIDstr )
 		
 		self.addToSendBuffer(message)
 		
@@ -317,7 +319,7 @@ class PPGraphContact(threading.Thread):
 	def sendConnect(self):
 		formatStr = "!iBBxxxBHHxxQ"
 		
-		friendlyNamestr = self.ppgraph.graphs[self.graphGUID].friendlyName + chr(0)
+		friendlyNamestr = self.ppgraph.graphs[self.graphGUID].friendlyName
 		
 		formatStr += str(len(friendlyNamestr)) + "s"
 		
@@ -333,7 +335,7 @@ class PPGraphContact(threading.Thread):
 		
 		formatStr = "!iBBxxQQBxHHH"
 		
-		peerIDstr = self.ppgraph.graphs[self.graphGUID].myPeerID + chr(0)
+		peerIDstr = self.ppgraph.graphs[self.graphGUID].myPeerID
 		
 		formatStr += str(len(peerIDstr)) + "s"
 		
@@ -414,17 +416,17 @@ class PPGraphContact(threading.Thread):
 		
 		recordStr = ""
 		
-		recordFormat = "!16s16sIxxxxI" + str(len(record.creator) + 1) + "sI" + str(len(record.lastModifiedBy) + 1) + "s"
-		recordFormat += "I" + str(len(record.securityData)) + "sQQQI" + str(len(self.graphGUID) + 1) + "sHI" + str(len(record.data)) + "s"
+		recordFormat = "!16s16sIxxxxI" + str(len(record.creator)) + "sI" + str(len(record.lastModifiedBy)) + "s"
+		recordFormat += "I" + str(len(record.securityData)) + "sQQQI" + str(len(self.graphGUID)) + "sHI" + str(len(record.data)) + "s"
 		
-		recordStr = struct.pack(recordFormat, record.typeID.bytes, record.guid.bytes, record.version, len(record.creator) + 1, record.creator + chr(0),
-					len(record.lastModifiedBy) + 1, record.lastModifiedBy + chr(0), len(record.securityData), record.securityData,
-					record.createdAt, record.expireTime, record.modificationTime, len(self.graphGUID) + 1, self.graphGUID + chr(0),
+		recordStr = struct.pack(recordFormat, record.typeID.bytes, record.guid.bytes, record.version, len(record.creator), record.creator,
+					len(record.lastModifiedBy), record.lastModifiedBy, len(record.securityData), record.securityData,
+					record.createdAt, record.expireTime, record.modificationTime, len(self.graphGUID), self.graphGUID,
 					0x0100, len(record.data), record.data)
 
 		if len(record.attributes) > 0:
-			recordFormat = str(len(record.attributes)+1) + "s"
-			recordStr += struct.pack(recordFormat, len(record.attributes)+1, record.attributes)
+			recordFormat = str(len(record.attributes)) + "s"
+			recordStr += struct.pack(recordFormat, len(record.attributes), record.attributes)
 		else:
 			recordStr += chr(0) + chr(0) + chr(0) + chr(0)
 		
@@ -485,8 +487,8 @@ class PPGraphContact(threading.Thread):
 			self.sendDisconnect()
 			return
 		
-		graphID = self.messageBuffer[graphIDOffset:sourceIDOffset - 1]
-		sourceID = self.messageBuffer[sourceIDOffset:destIDOffset - 1]
+		graphID = self.messageBuffer[graphIDOffset:sourceIDOffset]
+		sourceID = self.messageBuffer[sourceIDOffset:destIDOffset]
 		
 		self.graphGUID = graphID
 		if not self.ppgraph.graphs.has_key(graphID):
@@ -514,7 +516,7 @@ class PPGraphContact(threading.Thread):
 		
 		(nodeID,) = struct.unpack("Q", self.messageBuffer[16:24])
 		friendlyName = self.messageBuffer[friendlyNameOffset:]
-		friendlyName = friendlyName[:len(friendlyName) -1]
+		friendlyName = friendlyName[:len(friendlyName)]
 		
 		self.nodeID = nodeID
 		
@@ -532,9 +534,9 @@ class PPGraphContact(threading.Thread):
 			self.sendDisconnect()
 			return
 		
-		peerID = self.messageBuffer[peerIDoffset:friendlyNameOffset-1]
+		peerID = self.messageBuffer[peerIDoffset:friendlyNameOffset]
 		friendlyName = self.messageBuffer[friendlyNameOffset:]
-		friendlyName = friendlyName[:len(friendlyName) -1]
+		friendlyName = friendlyName[:len(friendlyName)]
 		
 		self.nodeID = nodeID
 		self.peerID = peerID
@@ -576,14 +578,14 @@ class PPGraphContact(threading.Thread):
 		raise Exception("Received a refuse message")
 		
 	def rcvDisconnect(self):
-		raise Exception("Received a disconnect message")
+		raise ConnectionClosedException()
 	
 	# loop through all the records we have, flooding the peer
 	# dummy implementation, ignores the inclusion and exclusion settings
 	def rcvSolicitNew(self):
 		self.ppgraph.lock.acquire()
 		try:
-			for (recordID, record) in self.ppgraph.graphs[self.graphGUID].records:
+			for (recordID, record) in self.ppgraph.graphs[self.graphGUID].records.items():
 				self.sendFlood(record)
 		finally:
 			self.ppgraph.lock.release()
@@ -623,20 +625,20 @@ class PPGraphContact(threading.Thread):
 		(recordType, recordId, record.version, creatorLength) = struct.unpack(recordFormat, recordStr[0:44])
 		record.typeID = uuid.UUID(bytes=recordType)
 		record.guid = uuid.UUID(bytes=recordId)
-		record.creator = recordStr[44:44 + creatorLength - 1]
+		record.creator = recordStr[44:44 + creatorLength ]
 		
 		
 		cursor = 44 + creatorLength
 		(lastModifiedIDLength,) = struct.unpack("!I", recordStr[cursor: cursor + 4])
 		cursor += 4
 		if lastModifiedIDLength > 0:
-			record.lastModifiedBy = recordStr[cursor:cursor + lastModifiedIDLength - 1]
+			record.lastModifiedBy = recordStr[cursor:cursor + lastModifiedIDLength]
 		
 		cursor += lastModifiedIDLength
 		(securityDataLength,) = struct.unpack("!I", recordStr[cursor: cursor + 4])
 		cursor += 4
 		if securityDataLength > 0:
-			record.securityData = recordStr[cursor:cursor + securityDataLength - 1]
+			record.securityData = recordStr[cursor:cursor + securityDataLength]
 		
 		cursor += securityDataLength
 		(record.createdAt, record.expireTime, record.modificationTime) = struct.unpack("!QQQ", recordStr[cursor:cursor+24])
@@ -644,7 +646,7 @@ class PPGraphContact(threading.Thread):
 		cursor += 24
 		(graphIDLength,) = struct.unpack("!I", recordStr[cursor: cursor + 4])
 		cursor += 4
-		graphID = recordStr[cursor:cursor + graphIDLength - 1]
+		graphID = recordStr[cursor:cursor + graphIDLength]
 		
 		if graphID != self.graphGUID:
 			self.sendDisconnect()
@@ -659,7 +661,7 @@ class PPGraphContact(threading.Thread):
 		(attributesLength,) = struct.unpack("!I", recordStr[cursor:cursor+4])
 		cursor += 4
 		if (attributesLength > 0):
-			record.attributes = recordStr[cursor:cursor + attributesLength - 1]
+			record.attributes = recordStr[cursor:cursor + attributesLength]
 		
 		
 		# check for the 4 special type of records
@@ -707,23 +709,23 @@ class PPGraphContact(threading.Thread):
 		graphData.scope = scope
 		
 		cursor = 16
-		graphID = record[cursor:cursor + graphIDLength - 1]
+		graphID = record[cursor:cursor + graphIDLength]
 		cursor += graphIDLength
 		
 		(creatorIDLength, ) = struct.unpack("!I", record[cursor: cursor + 4])
 		cursor += 4
-		graphData.creatorID = record[cursor:cursor + creatorIDLength - 1]
+		graphData.creatorID = record[cursor:cursor + creatorIDLength]
 		cursor += creatorIDLength
 		
 		(friendlyNameLength, ) = struct.unpack("!I", record[cursor: cursor + 4])
 		cursor += 4
-		graphData.friendlyName = record[cursor:cursor + friendlyNameLength - 1]
+		graphData.friendlyName = record[cursor:cursor + friendlyNameLength]
 		cursor += friendlyNameLength
 		
 		(commentLength, ) = struct.unpack("!I", record[cursor: cursor + 4])
 		cursor += 4
 		if commentLength > 0:
-			graphData.comment = record[cursor:cursor + commentLength - 1]
+			graphData.comment = record[cursor:cursor + commentLength]
 		cursor += commentLength
 		
 		(presenceLifetime, maxPresences, maxRecordSize) = struct.unpack("!III", record[cursor: cursor+12])
@@ -787,6 +789,7 @@ class PPGraph(threading.Thread):
 		
 		
 		self.serverThread = Server(self, self.listenPort)
+		self.serverThread.daemon = True
 		self.serverThread.start()
 		
 		
@@ -812,6 +815,7 @@ class PPGraph(threading.Thread):
 	def addConnection(self, socket):
 		
 		newconn = PPGraphContact(self, socket, True)
+		newconn.daemon = False
 		newconn.start()
 		
 	
@@ -829,9 +833,11 @@ class PPGraph(threading.Thread):
 		graph.friendlyName = friendlyName
 		
 		# TODO create node entry for myself
+		addrinfo = socket.getaddrinfo(address, port, socket.AF_INET6, socket.SOCK_STREAM)
+		(family, socktype, proto, canonname, sockaddr) = addrinfo[0]
 		
-		s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		s.connect((address, port))
+		s = socket.socket(family, socktype, proto)
+		s.connect(sockaddr)
 		
 		self.lock.acquire()
 		try:
@@ -840,6 +846,7 @@ class PPGraph(threading.Thread):
 			self.lock.release()
 			
 		newconn = PPGraphContact(self, s)
+		newconn.daemon = False
 		newconn.graphGUID = graphGUID
 		newconn.lock.acquire()
 		try:
@@ -887,6 +894,11 @@ class PPGraph(threading.Thread):
 		finally:
 			self.lock.release()
 			
+	def leaveGraph(self, graphId):
+		for (peerID, contact) in self.graphs[graphId].contacts.items():
+			contact.sendDisconnect(1)
+			
+		
 		
 	
 	# publish data of type recordTypeId to all members of the graph, returns
@@ -973,7 +985,7 @@ class PPGraph(threading.Thread):
 			if not self.graphs.has_key(graphId):
 				return None
 			
-			if not self.graphs.get(graphId).recordTypes.has_key(recordId):
+			if not self.graphs.get(graphId).recordTypes.has_key(recordTypeId):
 				return []
 			
 			return self.graphs.get(graphId).recordTypes.get(recordTypeId)
@@ -1033,13 +1045,12 @@ class Server(threading.Thread):
 	def run(self):
 		#create an INET, STREAMing socket
 		serversocket = socket.socket(
-			socket.AF_INET, socket.SOCK_STREAM)
+			socket.AF_INET6, socket.SOCK_STREAM)
 		#bind the socket to a public host,
 		# and a well-known port
-		serversocket.bind((socket.gethostname(), self.port))
+		serversocket.bind(("::", self.port))
 		#become a server socket
 		serversocket.listen(5)
-		print("Waiting for connection on " + str(self.port))
 		while True:
 			#accept connections from outside
 			(clientsocket, address) = serversocket.accept()

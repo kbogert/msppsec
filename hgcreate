@@ -1,0 +1,7 @@
+#!/bin/bash
+
+password=`sha1pass $RANDOM`
+
+RETURNVAL=`adduser --system --quiet homegroup`
+RETURNVAL=`(echo ${password}; echo ${password};) | smbpasswd -s -a homegroup`
+nohup python homegroup.py create homegroup $password &

@@ -1,0 +1,36 @@
+#!/bin/bash
+
+if [ ! -p /tmp/homegroup ]
+then
+    echo "HomeGroup not running"
+    exit 1
+fi
+
+if [ $# -lt 3 ]
+then
+    echo "Usage: hgmount (server) (share name) (mount point)"
+    exit 1
+
+else
+
+    echo "CONNECT $1" > /tmp/homegroup
+    
+    ANS=`cat /tmp/homegroup`
+    
+    if [ "$ANS" == "None" ]
+    then
+        echo "Server not found"
+        exit 1
+    fi
+    
+        
+    declare -a VALS
+    i=0
+    for a in $ANS
+    do
+        VALS[i]=$a
+        i=($i+1)
+    done
+    
+    smbmount //${VALS[0]}/$2 $3 -o user=${VALS[1]},password=${VALS[2]}
+fi
